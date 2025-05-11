@@ -6,10 +6,10 @@ import zipfile
 from openpyxl import Workbook
 
 st.set_page_config(page_title="Exam Seating Arrangement", layout="wide")
-st.title("📑 Exam Seating Arrangement Generator")
+st.title("Exam Seating Arrangement Generator Project IIT patna created using python")
 
 st.markdown("""
-Upload your **input Excel** (with sheets:
+Upload your **input Excel** with These sheets:
 - `in_timetable`
 - `in_course_roll_mapping`
 - `in_roll_name_mapping`
@@ -21,14 +21,14 @@ Choose **buffer** & **density**, then download:
 - **All schedules** as a single ZIP:
   - overall_seating.xlsx
   - seats_left.xlsx
-  - `<date>/morning_<date>.xlsx`
-  - `<date>/evening_<date>.xlsx`
+    - date = morning_date.xlsx
+    - date=evening_date.xlsx
 """)
 
 # 1) UPLOAD
 uploaded = st.file_uploader("Upload Excel file", type="xlsx")
 if not uploaded:
-    st.info("Awaiting Excel file upload…")
+    st.info("please upload Excel file ")
     st.stop()
 
 # 2) READ SHEETS
@@ -192,10 +192,10 @@ with zipfile.ZipFile(zip_buf, "w") as z:
 zip_buf.seek(0)
 
 st.download_button(
-    "📥 Download All Schedules (ZIP)",
+    " Download All Schedules (ZIP)",
     data=zip_buf,
     file_name="schedules.zip",
     mime="application/zip"
 )
 
-st.success("✅ schedules.zip is ready — click to download!")
+st.success("✅ schedules.zip is ready — click to download! regards AnujRaj")
