@@ -1,163 +1,201 @@
-import os
-import pandas as pd
-from datetime import datetime
+# streamlit_seating.py
+
 import streamlit as st
+import pandas as pd
+import math
+import io
+from openpyxl import load_workbook
 
-# Load the input data
-def load_data(file_path):
-    data = pd.read_excel(file_path, sheet_name=None, header=None)
+st.set_page_config(page_title="Exam Seating Arrangement", layout="wide")
+st.title("📑 Exam Seating Arrangement Generator")
 
-    # Process ip_1
-    ip_1_raw = data['ip_1']
-    ip_1_raw.columns = ip_1_raw.iloc[1].str.strip().str.lower()
-    ip_1 = ip_1_raw[2:].reset_index(drop=True)  # Skip the first two rows
-    ip_1.columns = ip_1.columns.str.strip().str.lower()
+st.markdown("""
+Upload your **input Excel** (with sheets:
+- `in_timetable`
+- `in_course_roll_mapping`
+- `in_roll_name_mapping`
+- `in_room_capacity`
 
-    # Process ip_2 (Exam timetable)
-    ip_2_raw = data['ip_2']
-    ip_2 = ip_2_raw.rename(columns={0: 'date', 1: 'day', 2: 'morning', 3: 'evening'})
-    ip_2 = ip_2[1:].reset_index(drop=True)  # Remove header row
+Choose **buffer** & **density**, then download:
+- Overall seating plan
+- Seats-left report
+- Morning routines (1 sheet per date)
+- Evening routines (1 sheet per date)
+""")
 
-    # Process ip_3 (Room capacity and block details)
-    ip_3 = data['ip_3']
-    ip_3.columns = ['room_no', 'exam_capacity', 'block']
-    ip_3['exam_capacity'] = pd.to_numeric(ip_3['exam_capacity'], errors='coerce')
+# 1) UPLOAD
+uploaded = st.file_uploader("Upload Excel file", type="xlsx")
+if not uploaded:
+    st.info("Awaiting Excel file upload…")
+    st.stop()
 
-    # Process ip_4 (Roll and Name mapping)
-    ip_4 = data['ip_4']
-    ip_4.columns = ['roll_no', 'student_name']
+# 2) READ SHEETS
+xls     = pd.ExcelFile(uploaded)
+df_tt   = xls.parse("in_timetable")
+df_cr   = xls.parse("in_course_roll_mapping")
+df_rn   = xls.parse("in_roll_name_mapping")
+df_room = xls.parse("in_room_capacity")
 
-    return ip_1, ip_2, ip_3, ip_4
+# 3) INPUTS
+buffer  = st.number_input("Buffer seats per room", min_value=0, step=1, value=5)
+density = st.radio("Density", ["Sparse", "Dense"])
 
-# Allocate rooms for exams
-def allocate_rooms(ip_1, ip_3, buffer=5, mode='dense'):
-    ip_1['course_code'] = ip_1['course_code'].str.strip()
-    course_counts = ip_1['course_code'].value_counts().to_dict()
-    sorted_courses = sorted(course_counts.keys(), key=lambda x: course_counts[x], reverse=True)
+# 4) PREP
+df_cr.columns = df_cr.columns.str.strip()
+df_cr['course_code'] = df_cr['course_code'].str.upper().str.strip()
+df_cr['rollno']      = df_cr['rollno'].str.upper().str.strip()
+df_rn.columns = df_rn.columns.str.strip()
+df_rn['Roll'] = df_rn['Roll'].str.upper().str.strip()
+name_dict = pd.Series(df_rn.Name.values, index=df_rn.Roll).to_dict()
+course_to_rolls = df_cr.groupby('course_code')['rollno'].apply(lambda s: sorted(s.tolist())).to_dict()
 
-    ip_3['block'] = ip_3['block'].astype(str).str.strip()
-    ip_3 = ip_3.sort_values(by=['block', 'room_no'], ascending=[True, True])
+rooms = []
+for _,r in df_room.iterrows():
+    rid   = str(r['Room No.']).strip()
+    cap   = int(r['Exam Capacity'])
+    block = str(r['Block']).strip()
+    num   = int(rid) if block=='B1' else int(rid.split('-')[-1])
+    rooms.append(dict(room=rid,capacity=cap,block=block,numeric=num))
 
-    room_allocations = []
+def allocate_course(course, rolls, avail):
+    N = len(rolls)
+    allowed=[]
+    for r in avail:
+        eff = r['capacity']-buffer
+        if eff<=0: continue
+        use = math.floor(eff*0.5) if density=='Sparse' else eff
+        if use>0:
+            allowed.append(dict(**r,allowed=use))
+    if sum(r['allowed'] for r in allowed) < N:
+        return None
+    b1=sorted([r for r in allowed if r['block']=='B1'], key=lambda x:x['numeric'])
+    b2=sorted([r for r in allowed if r['block']=='B2'], key=lambda x:x['numeric'])
+    # single block
+    for pool in (b1,b2):
+        if sum(r['allowed'] for r in pool)>=N:
+            # find contiguous
+            best=None
+            for i in range(len(pool)):
+                tot=0
+                for j in range(i,len(pool)):
+                    tot+=pool[j]['allowed']
+                    if tot>=N:
+                        L=j-i+1
+                        if not best or L<best[0]:
+                            best=(L,i,j)
+                        break
+            i,j=best[1],best[2]
+            seg=pool[i:j+1]
+            alloc=[]; rem=N; idx=0
+            for rr in seg:
+                t=min(rem, rr['allowed'])
+                alloc.append((rr['room'], rolls[idx:idx+t]))
+                idx+=t; rem-=t
+            return alloc
+    # split
+    first,second = (b1,b2) if sum(r['allowed'] for r in b1)>=sum(r['allowed'] for r in b2) else (b2,b1)
+    alloc=[]; rem=N; idx=0
+    for rr in first:
+        if rem<=0: break
+        t=min(rem, rr['allowed'])
+        alloc.append((rr['room'], rolls[idx:idx+t])); idx+=t; rem-=t
+    for rr in second:
+        if rem<=0: break
+        t=min(rem, rr['allowed'])
+        alloc.append((rr['room'], rolls[idx:idx+t])); idx+=t; rem-=t
+    return None if rem>0 else alloc
 
-    for _, room in ip_3.iterrows():
-        room_name = room['room_no']
-        room_capacity = room['exam_capacity'] - buffer
-        if pd.isna(room_capacity) or room_capacity <= 0:
-            continue
+# 5) ALLOCATE
+overall=[]; seats_left=[]
+morning_by_date={}; evening_by_date={}
+for _,r in df_tt.iterrows():
+    date = pd.to_datetime(r['Date']).strftime("%Y-%m-%d")
+    morn = [] if pd.isna(r['Morning']) else [c.strip() for c in r['Morning'].split(';')]
+    eve  = [] if pd.isna(r['Evening']) else [c.strip() for c in r['Evening'].split(';')]
 
-        room_fill = 0
-        for course in sorted_courses[:]:
-            course_students = ip_1[ip_1['course_code'] == course]
+    # Morning
+    avail,overflow = rooms.copy(),[]
+    for c in sorted(morn, key=lambda x:-len(course_to_rolls.get(x,[]))):
+        rolls=course_to_rolls.get(c,[])
+        if not rolls: continue
+        alloc=allocate_course(c,rolls,avail)
+        if not alloc: overflow.append(c)
+        else:
+            for rm,grp in alloc:
+                avail=[x for x in avail if x['room']!=rm]
+                overall.append({'Date':date,'Course':c,'Room':rm,'Count':len(grp),'Rolls':";".join(grp)})
+                morning_by_date.setdefault(date,[]).append((c,rm,grp))
 
-            if mode == 'dense' and len(course_students) <= room_capacity - room_fill:
-                room_allocations.append({
-                    'room': room_name,
-                    'course': course,
-                    'students': len(course_students),
-                    'vacant_seats': room_capacity - room_fill - len(course_students),
-                    'block': room['block']
-                })
-                room_fill += len(course_students)
-                sorted_courses.remove(course)
+    # Evening
+    avail=rooms.copy()
+    for c in sorted(eve+overflow, key=lambda x:-len(course_to_rolls.get(x,[]))):
+        rolls=course_to_rolls.get(c,[])
+        if not rolls: continue
+        alloc=allocate_course(c,rolls,avail)
+        if not alloc:
+            seats_left.append({'Date':date,'Course':c,'Unallocated':len(rolls)})
+        else:
+            for rm,grp in alloc:
+                avail=[x for x in avail if x['room']!=rm]
+                overall.append({'Date':date,'Course':c,'Room':rm,'Count':len(grp),'Rolls':";".join(grp)})
+                evening_by_date.setdefault(date,[]).append((c,rm,grp))
 
-    return pd.DataFrame(room_allocations)
+# 6) DISPLAY
+df_overall=pd.DataFrame(overall)
+df_left  =pd.DataFrame(seats_left)
+st.subheader("Overall Seating")
+st.dataframe(df_overall)
+st.subheader("Seats Left")
+st.dataframe(df_left)
 
-# Generate seating plan
-def generate_seating_plan(ip_1, ip_2, ip_4, room_allocations):
-    seating_plan = []
-    for _, allocation in room_allocations.iterrows():
-        course_students = ip_1[ip_1['course_code'] == allocation['course']]
-        merged = pd.merge(course_students, ip_4, left_on='rollno', right_on='roll_no', how='left')
-        room = allocation['room']
-        roll_list = ";".join(merged['roll_no'].tolist())
+# 7) DOWNLOAD Overall & Seats Left
+def to_xlsx(df,name):
+    buf=io.BytesIO()
+    with pd.ExcelWriter(buf,engine="openpyxl") as w:
+        df.to_excel(w,sheet_name=name,index=False)
+    buf.seek(0)
+    return buf
 
-        date, day, session = None, None, None
-        for _, row in ip_2.iterrows():
-            if allocation['course'] in str(row['morning']):
-                date, day, session = row['date'], row['day'], 'morning'
-                break
-            elif allocation['course'] in str(row['evening']):
-                date, day, session = row['date'], row['day'], 'evening'
-                break
+c1,c2=st.columns(2)
+c1.download_button("Download Overall",data=to_xlsx(df_overall,"Overall"),
+                   file_name="op_overall.xlsx",mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+c2.download_button("Download Seats Left",data=to_xlsx(df_left,"SeatsLeft"),
+                   file_name="op_seats_left.xlsx",mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-        if date is not None:
-            seating_plan.append({
-                'Date': pd.to_datetime(date).strftime("%d/%m/%Y"),
-                'Day': day,
-                'course_code': allocation['course'],
-                'Room': room,
-                'Allocated_students_count': len(merged),
-                'Roll_list': roll_list,
-                'Session': session
-            })
+# 8) BUILD Morning & Evening workbooks (one sheet per date)
+def build_workbook(routines,session):
+    buf=io.BytesIO()
+    # create empty sheets
+    with pd.ExcelWriter(buf,engine="openpyxl") as w:
+        for date in routines:
+            pd.DataFrame().to_excel(w,sheet_name=date,index=False)
+    buf.seek(0)
+    wb=load_workbook(buf)
+    for date,blocks in routines.items():
+        ws=wb[date]
+        row=1
+        for course,room,grp in blocks:
+            title=f"Course: {course} | Room: {room} | Date: {date} | Session: {session}"
+            ws.cell(row=row,column=1,value=title)
+            row+=1
+            ws.append(["Roll","Student Name","Signature"])
+            row+=1
+            for rn in grp:
+                nm=name_dict.get(rn,"Unknown Name")
+                ws.append([rn,nm,""])
+                row+=1
+            row+=2
+    out=io.BytesIO(); wb.save(out); out.seek(0)
+    return out
 
-    return pd.DataFrame(seating_plan)
+buf_morn=build_workbook(morning_by_date,"Morning")
+buf_eve =build_workbook(evening_by_date,"Evening")
 
-# Generate attendance sheet
-def generate_attendance_sheet(seating_plan, ip_4):
-    attendance_sheets = []
+# 9) DOWNLOAD Routines
+c3,c4=st.columns(2)
+c3.download_button("Download Morning Routines",data=buf_morn,
+                   file_name="morning_routine.xlsx",mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+c4.download_button("Download Evening Routines",data=buf_eve,
+                   file_name="evening_routine.xlsx",mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-    for _, row in seating_plan.iterrows():
-        room = row['Room']
-        roll_list = row['Roll_list'].split(";")
-        course_code = row['course_code']
-        date = row['Date']
-        session = row['Session']
-
-        attendance_data = ip_4[ip_4['roll_no'].isin(roll_list)].copy()
-        attendance_data['signature'] = ""
-
-        # Add blank rows for invigilators and TAs
-        blank_rows = pd.DataFrame({
-            'roll_no': [""] * 5,
-            'student_name': [""] * 5,
-            'signature': [""] * 5
-        })
-        attendance_data = pd.concat([attendance_data, blank_rows], ignore_index=True)
-
-        attendance_sheets.append({
-            'Date': date,
-            'Room': room,
-            'Session': session,
-            'Course_Code': course_code,
-            'Attendance_Data': attendance_data
-        })
-
-    return attendance_sheets
-
-# Streamlit application
-def main():
-    st.title("Exam Room Allocation and Seating Plan")
-    
-    uploaded_file = st.file_uploader("Upload Excel File", type=["xlsx"])
-    if uploaded_file is not None:
-        buffer = st.number_input("Buffer Seats Per Room", min_value=0, value=5)
-        mode = st.selectbox("Room Allocation Mode", options=["dense", "sparse"], index=0)
-
-        ip_1, ip_2, ip_3, ip_4 = load_data(uploaded_file)
-
-        st.subheader("Room Allocations")
-        room_allocations = allocate_rooms(ip_1, ip_3, buffer=buffer, mode=mode)
-        st.dataframe(room_allocations)
-
-        st.subheader("Seating Plan")
-        seating_plan = generate_seating_plan(ip_1, ip_2, ip_4, room_allocations)
-        st.dataframe(seating_plan)
-
-        st.subheader("Attendance Sheets")
-        attendance_sheets = generate_attendance_sheet(seating_plan, ip_4)
-
-        for sheet in attendance_sheets:
-            st.write(f"Room: {sheet['Room']}, Date: {sheet['Date']}, Session: {sheet['Session']}")
-            st.dataframe(sheet['Attendance_Data'])
-
-        # Download links for CSV and Excel
-        seating_csv = seating_plan.to_csv(index=False).encode('utf-8')
-        st.download_button(label="Download Seating Plan (CSV)", data=seating_csv, file_name="seating_plan.csv", mime="text/csv")
-
-        room_csv = room_allocations.to_csv(index=False).encode('utf-8')
-        st.download_button(label="Download Room Allocations (CSV)", data=room_csv, file_name="room_allocations.csv", mime="text/csv")
-
-if __name__ == "__main__":
-    main()
+st.success("All outputs ready!")
