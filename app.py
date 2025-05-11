@@ -172,33 +172,70 @@ c2.download_button("Download Seats Left",data=to_xlsx(df_left,"SeatsLeft"),
                    file_name="op_seats_left.xlsx",mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 # 8) BUILD Morning & Evening workbooks (one sheet per date)
-def build_workbook(routines,session):
-    buf=io.BytesIO()
-    # create empty sheets
-    with pd.ExcelWriter(buf,engine="openpyxl") as w:
-        for date in routines:
-            pd.DataFrame().to_excel(w,sheet_name=date,index=False)
+# 8) BUILD Morning & Evening workbooks (one sheet per course-room, as in 2nd screenshot)
+def build_course_workbook(allocs, session):
+    """
+    allocs: list of tuples (date, course, room, [rolls...])
+    session: "Morning" or "Evening"
+    """
+    buf = io.BytesIO()
+    # Create workbook and add each allocation as its own sheet
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        for date, course, room, grp in allocs:
+            sheet_name = f"{course} Room {room}"
+            # Build a small DataFrame including header row as first row
+            # We'll write the header row manually after saving to openpyxl
+            df_sheet = pd.DataFrame(grp, columns=["Roll"]).assign(
+                **{"Student Name": lambda d: d["Roll"].map(name_dict),
+                   "Signature": ""}
+            )
+            # Write the table starting at row=2 (so row1 is free for our title)
+            df_sheet.to_excel(writer, sheet_name=sheet_name,
+                              index=False, startrow=1)
     buf.seek(0)
-    wb=load_workbook(buf)
-    for date,blocks in routines.items():
-        ws=wb[date]
-        row=1
-        for course,room,grp in blocks:
-            title=f"Course: {course} | Room: {room} | Date: {date} | Session: {session}"
-            ws.cell(row=row,column=1,value=title)
-            row+=1
-            ws.append(["Roll","Student Name","Signature"])
-            row+=1
-            for rn in grp:
-                nm=name_dict.get(rn,"Unknown Name")
-                ws.append([rn,nm,""])
-                row+=1
-            row+=2
-    out=io.BytesIO(); wb.save(out); out.seek(0)
-    return out
 
-buf_morn=build_workbook(morning_by_date,"Morning")
-buf_eve =build_workbook(evening_by_date,"Evening")
+    # Now inject the title row in each sheet
+    wb = load_workbook(buf)
+    for date, course, room, grp in allocs:
+        sheet_name = f"{course} Room {room}"
+        ws = wb[sheet_name]
+        title = f"Course: {course} | Room: {room} | Date: {date} | Session: {session}"
+        ws.cell(row=1, column=1, value=title)
+    final = io.BytesIO()
+    wb.save(final)
+    final.seek(0)
+    return final
+
+# Flatten morning_by_date into list of (date, course, room, grp)
+morning_allocs = [
+    (date, course, room, grp)
+    for date, blocks in morning_by_date.items()
+    for course, room, grp in blocks
+]
+evening_allocs = [
+    (date, course, room, grp)
+    for date, blocks in evening_by_date.items()
+    for course, room, grp in blocks
+]
+
+buf_morn = build_course_workbook(morning_allocs, "Morning")
+buf_eve  = build_course_workbook(evening_allocs,  "Evening")
+
+# 9) DOWNLOAD Routines (unchanged)
+c3, c4 = st.columns(2)
+c3.download_button(
+    "📥 Download Morning Routines",
+    data=buf_morn,
+    file_name="morning_routine.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+)
+c4.download_button(
+    "📥 Download Evening Routines",
+    data=buf_eve,
+    file_name="evening_routine.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+)
+
 
 # 9) DOWNLOAD Routines
 c3,c4=st.columns(2)
