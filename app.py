@@ -4,7 +4,8 @@ import streamlit as st
 import pandas as pd
 import math
 import io
-from openpyxl import load_workbook
+import zipfile
+from openpyxl import Workbook
 
 st.set_page_config(page_title="Exam Seating Arrangement", layout="wide")
 st.title("📑 Exam Seating Arrangement Generator")
@@ -19,8 +20,11 @@ Upload your **input Excel** (with sheets:
 Choose **buffer** & **density**, then download:
 - Overall seating plan
 - Seats-left report
-- Morning routines (one sheet per course-room)
-- Evening routines (one sheet per course-room)
+- **All schedules** as a single ZIP:
+  - overall_seating.xlsx
+  - seats_left.xlsx
+  - `<date>/morning_<date>.xlsx`
+  - `<date>/evening_<date>.xlsx`
 """)
 
 # 1) UPLOAD
@@ -47,7 +51,11 @@ df_cr['rollno']      = df_cr['rollno'].str.upper().str.strip()
 df_rn.columns = df_rn.columns.str.strip()
 df_rn['Roll'] = df_rn['Roll'].str.upper().str.strip()
 name_dict = pd.Series(df_rn.Name.values, index=df_rn.Roll).to_dict()
-course_to_rolls = df_cr.groupby('course_code')['rollno'].apply(lambda s: sorted(s.tolist())).to_dict()
+course_to_rolls = (
+    df_cr.groupby('course_code')['rollno']
+         .apply(lambda s: sorted(s.tolist()))
+         .to_dict()
+)
 
 rooms = []
 for _, r in df_room.iterrows():
@@ -59,205 +67,137 @@ for _, r in df_room.iterrows():
 
 def allocate_course(course, rolls, avail):
     N = len(rolls)
-    allowed = []
+    allowed=[]
     for r in avail:
         eff = r['capacity'] - buffer
-        if eff <= 0:
-            continue
+        if eff<=0: continue
         use = math.floor(eff*0.5) if density=='Sparse' else eff
-        if use > 0:
+        if use>0:
             allowed.append(dict(**r, allowed=use))
     if sum(r['allowed'] for r in allowed) < N:
         return None
-
-    b1 = sorted([r for r in allowed if r['block']=='B1'], key=lambda x: x['numeric'])
-    b2 = sorted([r for r in allowed if r['block']=='B2'], key=lambda x: x['numeric'])
-
-    # try single block
-    for pool in (b1, b2):
+    b1 = sorted([r for r in allowed if r['block']=='B1'], key=lambda x:x['numeric'])
+    b2 = sorted([r for r in allowed if r['block']=='B2'], key=lambda x:x['numeric'])
+    for pool in (b1,b2):
         if sum(r['allowed'] for r in pool) >= N:
-            # find minimal contiguous
-            best = None
+            best=None
             for i in range(len(pool)):
-                tot = 0
-                for j in range(i, len(pool)):
-                    tot += pool[j]['allowed']
-                    if tot >= N:
-                        length = j - i + 1
-                        if not best or length < best[0]:
-                            best = (length, i, j)
+                tot=0
+                for j in range(i,len(pool)):
+                    tot+=pool[j]['allowed']
+                    if tot>=N:
+                        L=j-i+1
+                        if not best or L<best[0]:
+                            best=(L,i,j)
                         break
-            i, j = best[1], best[2]
-            seg = pool[i:j+1]
+            i,j = best[1], best[2]
+            seg=pool[i:j+1]
             alloc, rem, idx = [], N, 0
             for rr in seg:
                 t = min(rem, rr['allowed'])
                 alloc.append((rr['room'], rolls[idx:idx+t]))
-                idx += t
-                rem -= t
+                idx+=t; rem-=t
             return alloc
-
-    # split across blocks
-    first, second = (b1, b2) if sum(r['allowed'] for r in b1) >= sum(r['allowed'] for r in b2) else (b2, b1)
+    first,second = (b1,b2) if sum(r['allowed'] for r in b1)>=sum(r['allowed'] for r in b2) else (b2,b1)
     alloc, rem, idx = [], N, 0
     for rr in first:
-        if rem <= 0:
-            break
-        t = min(rem, rr['allowed'])
-        alloc.append((rr['room'], rolls[idx:idx+t]))
-        idx += t
-        rem -= t
+        if rem<=0: break
+        t=min(rem,rr['allowed'])
+        alloc.append((rr['room'], rolls[idx:idx+t])); idx+=t; rem-=t
     for rr in second:
-        if rem <= 0:
-            break
-        t = min(rem, rr['allowed'])
-        alloc.append((rr['room'], rolls[idx:idx+t]))
-        idx += t
-        rem -= t
+        if rem<=0: break
+        t=min(rem,rr['allowed'])
+        alloc.append((rr['room'], rolls[idx:idx+t])); idx+=t; rem-=t
+    return None if rem>0 else alloc
 
-    return None if rem > 0 else alloc
-
-# 5) ALLOCATION
-overall = []
-seats_left = []
-morning_by_date = {}
-evening_by_date = {}
+# 5) ALLOCATE
+overall=[]; seats_left=[]
+morning_by_date={}; evening_by_date={}
 
 for _, row in df_tt.iterrows():
     date = pd.to_datetime(row['Date']).strftime("%Y-%m-%d")
     morn = [] if pd.isna(row['Morning']) else [c.strip() for c in row['Morning'].split(';')]
     eve  = [] if pd.isna(row['Evening']) else [c.strip() for c in row['Evening'].split(';')]
 
-    # Morning
     avail, overflow = rooms.copy(), []
-    for c in sorted(morn, key=lambda x: -len(course_to_rolls.get(x, []))):
-        rolls = course_to_rolls.get(c, [])
-        if not rolls:
-            continue
-        alloc = allocate_course(c, rolls, avail)
-        if not alloc:
-            overflow.append(c)
+    for c in sorted(morn, key=lambda x:-len(course_to_rolls.get(x,[]))):
+        rolls=course_to_rolls.get(c,[])
+        if not rolls: continue
+        alloc=allocate_course(c,rolls,avail)
+        if not alloc: overflow.append(c)
         else:
-            for rm, grp in alloc:
-                avail = [x for x in avail if x['room'] != rm]
-                overall.append({
-                    'Date': date, 'Course': c, 'Room': rm,
-                    'Count': len(grp), 'Rolls': ";".join(grp)
-                })
-                morning_by_date.setdefault(date, []).append((c, rm, grp))
+            for rm,grp in alloc:
+                avail=[x for x in avail if x['room']!=rm]
+                overall.append({'Date':date,'Course':c,'Room':rm,'Count':len(grp),'Rolls':";".join(grp)})
+                morning_by_date.setdefault(date,[]).append((c,rm,grp))
 
-    # Evening (+ overflow)
-    avail = rooms.copy()
-    for c in sorted(eve + overflow, key=lambda x: -len(course_to_rolls.get(x, []))):
-        rolls = course_to_rolls.get(c, [])
-        if not rolls:
-            continue
-        alloc = allocate_course(c, rolls, avail)
+    avail=rooms.copy()
+    for c in sorted(eve+overflow, key=lambda x:-len(course_to_rolls.get(x,[]))):
+        rolls=course_to_rolls.get(c,[])
+        if not rolls: continue
+        alloc=allocate_course(c,rolls,avail)
         if not alloc:
-            seats_left.append({
-                'Date': date, 'Course': c,
-                'Unallocated': len(rolls)
-            })
+            seats_left.append({'Date':date,'Course':c,'Unallocated':len(rolls)})
         else:
-            for rm, grp in alloc:
-                avail = [x for x in avail if x['room'] != rm]
-                overall.append({
-                    'Date': date, 'Course': c, 'Room': rm,
-                    'Count': len(grp), 'Rolls': ";".join(grp)
-                })
-                evening_by_date.setdefault(date, []).append((c, rm, grp))
+            for rm,grp in alloc:
+                avail=[x for x in avail if x['room']!=rm]
+                overall.append({'Date':date,'Course':c,'Room':rm,'Count':len(grp),'Rolls':";".join(grp)})
+                evening_by_date.setdefault(date,[]).append((c,rm,grp))
 
 # 6) DISPLAY
 df_overall = pd.DataFrame(overall)
 df_left    = pd.DataFrame(seats_left)
 
-st.subheader("Overall Seating")
+st.subheader("Overall Seating Plan")
 st.dataframe(df_overall)
-
-st.subheader("Seats Left")
+st.subheader("Seats Left Report")
 st.dataframe(df_left)
 
-# 7) DOWNLOAD Overall & Seats Left
-def to_xlsx(df, sheet_name):
-    buf = io.BytesIO()
-    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        df.to_excel(writer, sheet_name=sheet_name, index=False)
+def buf_for_df(df, sheet):
+    buf=io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as w:
+        df.to_excel(w, sheet_name=sheet, index=False)
     buf.seek(0)
     return buf
 
-c1, c2 = st.columns(2)
-c1.download_button(
-    "📥 Download Overall Seating Plan",
-    data=to_xlsx(df_overall, "Overall"),
-    file_name="op_overall_seating_arrangement.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-)
-c2.download_button(
-    "📥 Download Seats Left Report",
-    data=to_xlsx(df_left, "SeatsLeft"),
-    file_name="op_seats_left.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-)
+# Create ZIP
+zip_buf = io.BytesIO()
+with zipfile.ZipFile(zip_buf, "w") as z:
+    z.writestr("overall_seating.xlsx", buf_for_df(df_overall,"Overall").getvalue())
+    z.writestr("seats_left.xlsx", buf_for_df(df_left,"SeatsLeft").getvalue())
 
-# 8) BUILD Morning & Evening workbooks (one sheet per course-room)
-def build_course_workbook(allocs, session):
-    buf = io.BytesIO()
-    # Write each course-room alloc as its own sheet
-    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        for date, course, room, grp in allocs:
-            sheet_name = f"{course} Room {room}"
-            # Build DataFrame for this sheet
-            df_sheet = pd.DataFrame(grp, columns=["Roll"])
-            df_sheet["Student Name"] = df_sheet["Roll"].map(name_dict)
-            df_sheet["Signature"] = ""
-            df_sheet.to_excel(
-                writer,
-                sheet_name=sheet_name,
-                index=False,
-                startrow=1  # leave row 1 for title
-            )
-    buf.seek(0)
+    for date, blocks in morning_by_date.items():
+        wb = Workbook()
+        wb.remove(wb.active)
+        for course, room, grp in blocks:
+            sheet = wb.create_sheet(title=f"{course} Room {room}")
+            sheet.append([f"Course: {course} | Room: {room} | Date: {date} | Session: Morning"])
+            sheet.append(["Roll","Student Name","Signature"])
+            for rn in grp:
+                sheet.append([rn, name_dict.get(rn,"Unknown Name"), ""])
+        out = io.BytesIO(); wb.save(out)
+        z.writestr(f"{date}/morning_{date}.xlsx", out.getvalue())
 
-    # Inject title row into each sheet
-    wb = load_workbook(buf)
-    for date, course, room, grp in allocs:
-        sheet_name = f"{course} Room {room}"
-        ws = wb[sheet_name]
-        title = f"Course: {course} | Room: {room} | Date: {date} | Session: {session}"
-        ws.cell(row=1, column=1, value=title)
-    final = io.BytesIO()
-    wb.save(final)
-    final.seek(0)
-    return final
+        evening_blocks = evening_by_date.get(date, [])
+        if evening_blocks:
+            wb = Workbook()
+            wb.remove(wb.active)
+            for course, room, grp in evening_blocks:
+                sheet = wb.create_sheet(title=f"{course} Room {room}")
+                sheet.append([f"Course: {course} | Room: {room} | Date: {date} | Session: Evening"])
+                sheet.append(["Roll","Student Name","Signature"])
+                for rn in grp:
+                    sheet.append([rn, name_dict.get(rn,"Unknown Name"), ""])
+            out = io.BytesIO(); wb.save(out)
+            z.writestr(f"{date}/evening_{date}.xlsx", out.getvalue())
 
-# Flatten dicts into lists
-morning_allocs = [
-    (date, course, room, grp)
-    for date, blocks in morning_by_date.items()
-    for course, room, grp in blocks
-]
-evening_allocs = [
-    (date, course, room, grp)
-    for date, blocks in evening_by_date.items()
-    for course, room, grp in blocks
-]
+zip_buf.seek(0)
 
-buf_morn = build_course_workbook(morning_allocs, "Morning")
-buf_eve  = build_course_workbook(evening_allocs, "Evening")
-
-# 9) DOWNLOAD Routines
-c3, c4 = st.columns(2)
-c3.download_button(
-    "📥 Download Morning Routines",
-    data=buf_morn,
-    file_name="morning_routine.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-)
-c4.download_button(
-    "📥 Download Evening Routines",
-    data=buf_eve,
-    file_name="evening_routine.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+st.download_button(
+    "📥 Download All Schedules (ZIP)",
+    data=zip_buf,
+    file_name="schedules.zip",
+    mime="application/zip"
 )
 
-st.success("✅ All outputs are ready!")
+st.success("✅ schedules.zip is ready — click to download!")
