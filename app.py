@@ -1,4 +1,13 @@
 # streamlit_seating.py
+import subprocess
+import sys
+
+# Ensure openpyxl is installed
+subprocess.run([sys.executable, "-m", "pip", "install", "openpyxl"], check=True)
+
+import streamlit as st
+import pandas as pd
+# … rest of your imports and code …
 
 import streamlit as st
 import pandas as pd
