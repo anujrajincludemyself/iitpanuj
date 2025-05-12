@@ -1,2 +1,2 @@
-https://iitpanuj-iuru3newj3ivcnafvm6qvh.streamlit.app/
+https://iitpanuj-avnf47wshc3dokfmbuopbk.streamlit.app/ 
 this is the app
