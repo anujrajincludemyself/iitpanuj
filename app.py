@@ -10,12 +10,33 @@ from openpyxl.utils import get_column_letter
 
 # ──────────────── Front‐end Configuration ────────────────
 st.set_page_config(page_title="Exam Seating Arrangement", layout="wide")
-st.title("Exam Seating Arrangement Generator Project IIT Patna Created Using Python By Anuj raj")
+st.title(" Exam Seating Arrangement Generator Project IIT Patna By Anuj Raj")
 
-uploaded = st.file_uploader("Upload input Excel", type="xlsx")
+st.markdown("""
+###  Instructions:
+
+**Upload your input Excel with these sheets:**
+- `in_timetable`
+- `in_course_roll_mapping`
+- `in_roll_name_mapping`
+- `in_room_capacity`
+
+---
+
+**Then choose buffer & density, and download:**
+- ✅ `overall_seating.xlsx`
+- ✅ `seats_left.xlsx`
+- ✅ All individual date & session-wise attendance sheets zipped inside:
+    - `date = morning_date.xlsx`
+    - `date = evening_date.xlsx`
+""")
+
+uploaded = st.file_uploader("**Upload your input Excel file (.xlsx)**", type="xlsx")
+
 if not uploaded:
-    st.info("Please upload the Excel file.")
+    st.info("👆 Please upload your Excel file to proceed.")
     st.stop()
+
 
 # ──────────────── 2) READ SHEETS ────────────────
 xls      = pd.ExcelFile(uploaded)
