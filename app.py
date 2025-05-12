@@ -198,4 +198,4 @@ st.download_button(
     mime="application/zip"
 )
 
-st.success("✅ schedules.zip is ready — click to download! regards AnujRaj")
+st.success(" schedules.zip is ready — click to download regards AnujRaj")
