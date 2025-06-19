@@ -36,10 +36,16 @@ seats_left.xlsx — unallocated students (if any)
 
 Per-date, per-session attendance sheets inside a downloadable ZIP
 
+
+
+
 📁 Example Output
 python
+
 Copy
+
 Edit
+
 schedules.zip
 ├── 12_06_2025/
 │   ├── morning/
@@ -50,6 +56,11 @@ schedules.zip
 │       └── ...
 ├── overall_seating.xlsx
 └── seats_left.xlsx
+
+
+
+
+
 
 
 🛠️ Technologies Used
